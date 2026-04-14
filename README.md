@@ -152,6 +152,11 @@ Lab documentation is available in both English and Chinese:
 | 3 - Query Execution | [lab3_query_execution_en.md](docs/lab3_query_execution_en.md) | [lab3_query_execution_zh.md](docs/lab3_query_execution_zh.md) |
 | 4 - Concurrency Control | [lab4_concurrency_control_en.md](docs/lab4_concurrency_control_en.md) | [lab4_concurrency_control_zh.md](docs/lab4_concurrency_control_zh.md) |
 
+## Submission
+
+The submission deadline for this project is **May, 12th**. 
+You should fork or clone this repository, complete Task 1-3 and upload the Github link to your submission on Canvas.
+
 ## Common Mistakes
 
 Check [here](docs/common_mistakes.md).
