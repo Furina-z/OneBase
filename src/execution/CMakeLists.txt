@@ -10,6 +10,7 @@ add_library(onebase_execution
   executors/sort_executor.cpp
   executors/limit_executor.cpp
   executors/projection_executor.cpp
+  executors/utility_executor.cpp
   executors/executor_factory.cpp
   executors/execution_engine.cpp
 )

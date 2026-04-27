@@ -75,6 +75,10 @@ auto ExecutorFactory::CreateExecutor(ExecutorContext *exec_ctx, const AbstractPl
       return std::make_unique<LimitExecutor>(exec_ctx, limit_plan, std::move(child));
     }
 
+        case PlanType::UTILITY:
+          return std::make_unique<UtilityExecutor>(
+              exec_ctx, dynamic_cast<const UtilityPlanNode *>(plan.get()));
+
     default:
       throw std::runtime_error("Unknown plan type in ExecutorFactory");
   }

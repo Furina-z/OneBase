@@ -47,6 +47,40 @@ struct AggCall {
   AbstractExpressionRef arg;  // may be nullptr for COUNT(*)
 };
 
+  auto JoinStrings(const std::vector<std::string> &parts, const std::string &separator) -> std::string {
+    std::string joined;
+    for (size_t i = 0; i < parts.size(); ++i) {
+      if (i > 0) {
+        joined += separator;
+      }
+      joined += parts[i];
+    }
+    return joined;
+  }
+
+  auto NodeToQualifiedName(PGNode *node) -> std::string {
+    if (node == nullptr) {
+      return {};
+    }
+    if (node->type == duckdb_libpgquery::T_PGString) {
+      return strVal(node);
+    }
+    if (node->type == duckdb_libpgquery::T_PGList) {
+      std::vector<std::string> parts;
+      auto *list = reinterpret_cast<PGList *>(node);
+      PGListCell *cell;
+      foreach (cell, list) {
+        parts.push_back(NodeToQualifiedName(static_cast<PGNode *>(lfirst(cell))));
+      }
+      return JoinStrings(parts, ".");
+    }
+    if (node->type == duckdb_libpgquery::T_PGRangeVar) {
+      auto *range_var = reinterpret_cast<PGRangeVar *>(node);
+      return range_var->relname ? range_var->relname : "";
+    }
+    return {};
+  }
+
 // ---- Forward declarations of binding helpers ------------------------------
 
 auto BindExpression(PGNode *node, const std::vector<TableScope> &scopes) -> AbstractExpressionRef;
@@ -231,6 +265,23 @@ auto CountSchema() -> Schema {
   return Schema({Column("count", TypeId::INTEGER)});
 }
 
+  auto CommandSchema() -> Schema {
+    return Schema({Column("command_tag", TypeId::VARCHAR)});
+  }
+
+  auto ShowTablesSchema() -> Schema {
+    return Schema({Column("table_name", TypeId::VARCHAR)});
+  }
+
+  auto ShowIndexesSchema() -> Schema {
+    return Schema({Column("index_name", TypeId::VARCHAR), Column("table_name", TypeId::VARCHAR),
+                   Column("columns", TypeId::VARCHAR)});
+  }
+
+  auto ShowSchemaSchema() -> Schema {
+    return Schema({Column("column_name", TypeId::VARCHAR), Column("column_type", TypeId::VARCHAR)});
+  }
+
 // Collect all columns from scopes as a single schema
 auto CollectAllColumns(const std::vector<TableScope> &scopes) -> Schema {
   std::vector<Column> columns;
@@ -265,6 +316,86 @@ auto Binder::BindQuery(const std::string &sql) -> AbstractPlanNodeRef {
 
   auto *raw_stmt = static_cast<PGRawStmt *>(lfirst(list_head(parser.parse_tree)));
   auto *stmt = raw_stmt->stmt;
+
+  switch (stmt->type) {
+    case duckdb_libpgquery::T_PGIndexStmt: {
+      auto *index_stmt = reinterpret_cast<PGIndexStmt *>(stmt);
+      if (index_stmt->relation == nullptr || index_stmt->idxname == nullptr) {
+        throw std::runtime_error("Invalid CREATE INDEX statement");
+      }
+
+      auto *table_info = catalog_->GetTable(index_stmt->relation->relname);
+      if (table_info == nullptr) {
+        throw std::runtime_error("Table not found: " + std::string(index_stmt->relation->relname));
+      }
+
+      std::vector<uint32_t> key_attrs;
+      PGListCell *cell;
+      foreach (cell, index_stmt->indexParams) {
+        auto *index_elem = reinterpret_cast<PGIndexElem *>(lfirst(cell));
+        if (index_elem->name == nullptr || index_elem->expr != nullptr) {
+          throw std::runtime_error("Only column-based CREATE INDEX is supported");
+        }
+        auto column_idx = table_info->schema_.GetColumnIdx(index_elem->name);
+        if (column_idx == UINT32_MAX) {
+          throw std::runtime_error("Column not found: " + std::string(index_elem->name));
+        }
+        key_attrs.push_back(column_idx);
+      }
+
+      return std::make_shared<UtilityPlanNode>(
+          CommandSchema(), UtilityType::CREATE_INDEX, index_stmt->relation->relname,
+          index_stmt->idxname, key_attrs);
+    }
+
+    case duckdb_libpgquery::T_PGDropStmt: {
+      auto *drop_stmt = reinterpret_cast<PGDropStmt *>(stmt);
+      if (drop_stmt->removeType != PG_OBJECT_INDEX) {
+        break;
+      }
+
+      std::vector<std::string> object_names;
+      PGListCell *cell;
+      foreach (cell, drop_stmt->objects) {
+        auto *object_node = static_cast<PGNode *>(lfirst(cell));
+        auto name = NodeToQualifiedName(object_node);
+        if (!name.empty()) {
+          object_names.push_back(std::move(name));
+        }
+      }
+
+      return std::make_shared<UtilityPlanNode>(
+          CommandSchema(), UtilityType::DROP_INDEX, "", "", {}, object_names, drop_stmt->missing_ok);
+    }
+
+    case duckdb_libpgquery::T_PGVariableShowStmt: {
+      auto *show_stmt = reinterpret_cast<PGVariableShowStmt *>(stmt);
+
+      if (show_stmt->set != nullptr) {
+        std::string set_name = show_stmt->set;
+        if (set_name == "__show_tables_expanded" || set_name == "__show_tables_from_database") {
+          return std::make_shared<UtilityPlanNode>(ShowTablesSchema(), UtilityType::SHOW_TABLES);
+        }
+      }
+
+      if (show_stmt->relation != nullptr) {
+        std::string relation_name = show_stmt->relation->relname;
+        if (relation_name == "index" || relation_name == "indexes") {
+          return std::make_shared<UtilityPlanNode>(ShowIndexesSchema(), UtilityType::SHOW_INDEXES);
+        }
+
+        auto *table_info = catalog_->GetTable(relation_name);
+        if (table_info != nullptr) {
+          return std::make_shared<UtilityPlanNode>(ShowSchemaSchema(), UtilityType::SHOW_SCHEMA,
+                                                   relation_name);
+        }
+      }
+
+      break;
+    }
+    default:
+      break;
+  }
 
   switch (stmt->type) {
     case duckdb_libpgquery::T_PGSelectStmt: {

@@ -40,11 +40,15 @@ auto Catalog::GetAllTables() const -> std::vector<TableInfo *> {
 auto Catalog::CreateIndex(const std::string &index_name, const std::string &table_name,
                           const std::vector<uint32_t> &key_attrs) -> IndexInfo * {
   auto *table_info = GetTable(table_name);
-  if (table_info == nullptr) { return nullptr; }
+  if (table_info == nullptr || index_name.empty() || key_attrs.empty()) { return nullptr; }
+  if (GetIndex(index_name, table_name) != nullptr) { return nullptr; }
 
   // Build key schema from key attributes
   std::vector<Column> key_columns;
   for (auto attr : key_attrs) {
+    if (attr >= table_info->schema_.GetColumnCount()) {
+      return nullptr;
+    }
     key_columns.push_back(table_info->schema_.GetColumn(attr));
   }
   Schema key_schema(key_columns);
@@ -56,6 +60,20 @@ auto Catalog::CreateIndex(const std::string &index_name, const std::string &tabl
   indexes_[index_oid] = std::move(index_info);
   index_names_[table_name][index_name] = index_oid;
   return raw;
+}
+
+auto Catalog::DropIndex(const std::string &index_name, const std::string &table_name) -> bool {
+  auto table_it = index_names_.find(table_name);
+  if (table_it == index_names_.end()) { return false; }
+  auto idx_it = table_it->second.find(index_name);
+  if (idx_it == table_it->second.end()) { return false; }
+
+  indexes_.erase(idx_it->second);
+  table_it->second.erase(idx_it);
+  if (table_it->second.empty()) {
+    index_names_.erase(table_it);
+  }
+  return true;
 }
 
 auto Catalog::GetIndex(const std::string &index_name, const std::string &table_name) const -> IndexInfo * {
@@ -72,6 +90,15 @@ auto Catalog::GetTableIndexes(const std::string &table_name) const -> std::vecto
   if (table_it == index_names_.end()) { return result; }
   for (const auto &[name, oid] : table_it->second) {
     result.push_back(indexes_.at(oid).get());
+  }
+  return result;
+}
+
+auto Catalog::GetAllIndexes() const -> std::vector<IndexInfo *> {
+  std::vector<IndexInfo *> result;
+  result.reserve(indexes_.size());
+  for (const auto &[oid, info] : indexes_) {
+    result.push_back(info.get());
   }
   return result;
 }

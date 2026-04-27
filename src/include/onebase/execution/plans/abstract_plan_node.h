@@ -18,6 +18,7 @@ enum class PlanType {
   SORT,
   LIMIT,
   PROJECTION,
+  UTILITY,
 };
 
 class AbstractPlanNode {

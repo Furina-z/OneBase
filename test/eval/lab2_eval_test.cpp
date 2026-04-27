@@ -1,275 +1,144 @@
 #include <gtest/gtest.h>
+
 #include <algorithm>
-#include <functional>
 #include <string>
 #include <vector>
 
 #include "eval/grading.h"
+#include "eval/sql_test_client.h"
 
-#include "onebase/buffer/buffer_pool_manager.h"
-#include "onebase/common/rid.h"
-#include "onebase/storage/disk/disk_manager.h"
-#include "onebase/storage/index/b_plus_tree.h"
-#include "onebase/storage/index/b_plus_tree_iterator.h"
+#include "onebase/catalog/column.h"
+#include "onebase/catalog/schema.h"
+#include "onebase/type/type_id.h"
 
 namespace onebase {
 
-class BPlusTreeEvalTest : public ::testing::Test {
- protected:
-  void SetUp() override {
-    db_name_ = "__eval_bpt_" + std::to_string(reinterpret_cast<uintptr_t>(this)) + ".db";
-    disk_manager_ = new DiskManager(db_name_);
-    bpm_ = new BufferPoolManager(200, disk_manager_);
-  }
-  void TearDown() override {
-    delete bpm_;
-    disk_manager_->ShutDown();
-    delete disk_manager_;
-    std::remove(db_name_.c_str());
-  }
+namespace {
 
-  std::string db_name_;
-  DiskManager *disk_manager_{nullptr};
-  BufferPoolManager *bpm_{nullptr};
+using onebase::eval::SqlTestClient;
+using onebase::eval::Table;
+
+auto SortRows(std::vector<std::vector<std::string>> rows) -> std::vector<std::vector<std::string>> {
+  std::sort(rows.begin(), rows.end());
+  return rows;
+}
+
+auto ExpectTableEquals(const Table &table, const std::vector<std::string> &expected_headers,
+                       std::vector<std::vector<std::string>> expected_rows) -> void {
+  EXPECT_EQ(table.GetHeaders(), expected_headers);
+  EXPECT_EQ(SortRows(table.GetRows()), SortRows(std::move(expected_rows)));
+}
+
+}  // namespace
+
+class IndexSqlEvalTest : public ::testing::Test {
+ protected:
+  void SetUp() override { client_ = std::make_unique<SqlTestClient>("lab2"); }
+
+  std::unique_ptr<SqlTestClient> client_;
 };
 
 // ============================================================
-// Insert Tests (50 pts)
+// Index DDL / SHOW integration (100 pts)
 // ============================================================
 
-GRADED_TEST_F(BPlusTreeEvalTest, SingleInsertLookup, 10) {
-  BPlusTree<int, RID, std::less<int>> tree("test", bpm_, std::less<int>{}, 4, 4);
+GRADED_TEST_F(IndexSqlEvalTest, CreateShowDropAndSchema, 30) {
+  client_->CreateTable(
+      "orders",
+      Schema({Column("order_id", TypeId::INTEGER), Column("customer_id", TypeId::INTEGER),
+              Column("region_id", TypeId::INTEGER), Column("created_at", TypeId::INTEGER)}));
+  client_->CreateTable(
+      "audit",
+      Schema({Column("audit_id", TypeId::INTEGER), Column("customer_id", TypeId::INTEGER),
+              Column("note", TypeId::VARCHAR)}));
 
-  RID rid(1, 1);
-  EXPECT_TRUE(tree.Insert(5, rid));
+  EXPECT_EQ(client_->ExecuteQuery("SHOW INDEX").GetRowCount(), 0u);
 
-  std::vector<RID> result;
-  EXPECT_TRUE(tree.GetValue(5, &result));
-  ASSERT_EQ(result.size(), 1u);
-  EXPECT_EQ(result[0], rid);
+  EXPECT_EQ(client_->ExecuteCommand("CREATE INDEX idx_orders_customer ON orders (customer_id)"),
+            "CREATE INDEX idx_orders_customer");
+  EXPECT_EQ(client_->ExecuteCommand("CREATE INDEX idx_orders_region_created ON orders (region_id, created_at)"),
+            "CREATE INDEX idx_orders_region_created");
+  EXPECT_EQ(client_->ExecuteCommand("CREATE INDEX idx_audit_customer ON audit (customer_id)"),
+            "CREATE INDEX idx_audit_customer");
+
+  auto indexes = client_->ExecuteQuery("SHOW INDEXES");
+  ExpectTableEquals(indexes, {"index_name", "table_name", "columns"},
+                    {{"idx_orders_customer", "orders", "customer_id"},
+                     {"idx_orders_region_created", "orders", "region_id,created_at"},
+                     {"idx_audit_customer", "audit", "customer_id"}});
+
+  auto orders_schema = client_->ExecuteQuery("SHOW orders");
+  ExpectTableEquals(orders_schema, {"column_name", "column_type"},
+                    {{"order_id", "order_id:INTEGER"},
+                     {"customer_id", "customer_id:INTEGER"},
+                     {"region_id", "region_id:INTEGER"},
+                     {"created_at", "created_at:INTEGER"}});
+
+  auto tables = client_->ExecuteQuery("SHOW TABLES");
+  ExpectTableEquals(tables, {"table_name"}, {{"audit"}, {"orders"}});
+
+  EXPECT_EQ(client_->ExecuteCommand("DROP INDEX idx_orders_customer"), "DROP INDEX");
+  indexes = client_->ExecuteQuery("SHOW INDEX");
+  ExpectTableEquals(indexes, {"index_name", "table_name", "columns"},
+                    {{"idx_orders_region_created", "orders", "region_id,created_at"},
+                     {"idx_audit_customer", "audit", "customer_id"}});
 }
 
-GRADED_TEST_F(BPlusTreeEvalTest, MultipleInserts, 10) {
-  BPlusTree<int, RID, std::less<int>> tree("test", bpm_, std::less<int>{}, 4, 4);
+GRADED_TEST_F(IndexSqlEvalTest, RejectInvalidDefinitionsAndMissingObjects, 25) {
+  client_->CreateTable("users",
+                       Schema({Column("id", TypeId::INTEGER), Column("name", TypeId::VARCHAR),
+                               Column("age", TypeId::INTEGER)}));
 
-  std::vector<int> keys = {7, 3, 9, 1, 5, 8, 2, 6, 4, 10};
-  for (auto k : keys) {
-    EXPECT_TRUE(tree.Insert(k, RID(k, k)));
-  }
+  EXPECT_EQ(client_->ExecuteCommand("CREATE INDEX idx_users_id ON users (id)"),
+            "CREATE INDEX idx_users_id");
 
-  for (auto k : keys) {
-    std::vector<RID> result;
-    EXPECT_TRUE(tree.GetValue(k, &result));
-    ASSERT_EQ(result.size(), 1u);
-    EXPECT_EQ(result[0], RID(k, k));
-  }
+  EXPECT_THROW(client_->ExecuteCommand("CREATE INDEX idx_users_id ON users (id)"), std::runtime_error);
+  EXPECT_THROW(client_->ExecuteCommand("CREATE INDEX idx_missing_table ON missing_table (id)"),
+               std::runtime_error);
+  EXPECT_THROW(client_->ExecuteCommand("CREATE INDEX idx_missing_column ON users (missing)"),
+               std::runtime_error);
 
-  // Key not inserted
-  std::vector<RID> result;
-  EXPECT_FALSE(tree.GetValue(99, &result));
+  auto indexes = client_->ExecuteQuery("SHOW INDEX");
+  ExpectTableEquals(indexes, {"index_name", "table_name", "columns"}, {{"idx_users_id", "users", "id"}});
+
+  EXPECT_THROW(client_->ExecuteCommand("DROP INDEX missing_index"), std::runtime_error);
+  EXPECT_EQ(client_->ExecuteCommand("DROP INDEX IF EXISTS missing_index"), "DROP INDEX (0 rows)");
+
+  indexes = client_->ExecuteQuery("SHOW INDEX");
+  ExpectTableEquals(indexes, {"index_name", "table_name", "columns"}, {{"idx_users_id", "users", "id"}});
 }
 
-GRADED_TEST_F(BPlusTreeEvalTest, LeafSplit, 10) {
-  // leaf_max_size=3: leaf splits after 3 keys
-  BPlusTree<int, RID, std::less<int>> tree("test", bpm_, std::less<int>{}, 3, 5);
+GRADED_TEST_F(IndexSqlEvalTest, AmbiguousIndexNamesAcrossTables, 25) {
+  client_->CreateTable("left_side", Schema({Column("id", TypeId::INTEGER), Column("payload", TypeId::INTEGER)}));
+  client_->CreateTable("right_side", Schema({Column("id", TypeId::INTEGER), Column("payload", TypeId::INTEGER)}));
 
-  for (int i = 1; i <= 5; i++) {
-    EXPECT_TRUE(tree.Insert(i, RID(i, i)));
-  }
+  EXPECT_EQ(client_->ExecuteCommand("CREATE INDEX idx_shared ON left_side (id)"), "CREATE INDEX idx_shared");
+  EXPECT_EQ(client_->ExecuteCommand("CREATE INDEX idx_shared ON right_side (id)"), "CREATE INDEX idx_shared");
 
-  // All keys still reachable after split
-  for (int i = 1; i <= 5; i++) {
-    std::vector<RID> result;
-    EXPECT_TRUE(tree.GetValue(i, &result));
-    ASSERT_EQ(result.size(), 1u);
-  }
+  auto indexes = client_->ExecuteQuery("SHOW INDEX");
+  ExpectTableEquals(indexes, {"index_name", "table_name", "columns"},
+                    {{"idx_shared", "left_side", "id"}, {"idx_shared", "right_side", "id"}});
+
+  EXPECT_THROW(client_->ExecuteCommand("DROP INDEX idx_shared"), std::runtime_error);
 }
 
-GRADED_TEST_F(BPlusTreeEvalTest, InternalSplit, 10) {
-  // Small sizes force internal splits
-  BPlusTree<int, RID, std::less<int>> tree("test", bpm_, std::less<int>{}, 3, 3);
+GRADED_TEST_F(IndexSqlEvalTest, ShowTablesAndEmptyIndexViewStayStable, 20) {
+  client_->CreateTable("empty_view",
+                       Schema({Column("flag", TypeId::BOOLEAN), Column("title", TypeId::VARCHAR)}));
+  client_->CreateTable("wide_view",
+                       Schema({Column("c1", TypeId::INTEGER), Column("c2", TypeId::INTEGER),
+                               Column("c3", TypeId::INTEGER), Column("c4", TypeId::INTEGER),
+                               Column("c5", TypeId::INTEGER)}));
 
-  for (int i = 1; i <= 20; i++) {
-    EXPECT_TRUE(tree.Insert(i, RID(i, i)));
-  }
+  auto tables = client_->ExecuteQuery("SHOW TABLES");
+  ExpectTableEquals(tables, {"table_name"}, {{"empty_view"}, {"wide_view"}});
 
-  for (int i = 1; i <= 20; i++) {
-    std::vector<RID> result;
-    EXPECT_TRUE(tree.GetValue(i, &result));
-    ASSERT_EQ(result.size(), 1u);
-    EXPECT_EQ(result[0], RID(i, i));
-  }
-}
+  auto empty_indexes = client_->ExecuteQuery("SHOW INDEXES");
+  ExpectTableEquals(empty_indexes, {"index_name", "table_name", "columns"}, {});
 
-GRADED_TEST_F(BPlusTreeEvalTest, DuplicateKey, 5) {
-  BPlusTree<int, RID, std::less<int>> tree("test", bpm_, std::less<int>{}, 4, 4);
-
-  EXPECT_TRUE(tree.Insert(42, RID(1, 1)));
-  EXPECT_FALSE(tree.Insert(42, RID(2, 2)));  // duplicate
-
-  std::vector<RID> result;
-  EXPECT_TRUE(tree.GetValue(42, &result));
-  ASSERT_EQ(result.size(), 1u);
-  EXPECT_EQ(result[0], RID(1, 1));  // original value
-}
-
-GRADED_TEST_F(BPlusTreeEvalTest, LargeScale, 5) {
-  BPlusTree<int, RID, std::less<int>> tree("test", bpm_, std::less<int>{}, 5, 5);
-
-  for (int i = 0; i < 500; i++) {
-    EXPECT_TRUE(tree.Insert(i, RID(i, i)));
-  }
-
-  for (int i = 0; i < 500; i++) {
-    std::vector<RID> result;
-    EXPECT_TRUE(tree.GetValue(i, &result)) << "Missing key: " << i;
-    ASSERT_EQ(result.size(), 1u);
-  }
-}
-
-// ============================================================
-// Delete Tests (50 pts)
-// ============================================================
-
-GRADED_TEST_F(BPlusTreeEvalTest, SimpleDelete, 10) {
-  BPlusTree<int, RID, std::less<int>> tree("test", bpm_, std::less<int>{}, 4, 4);
-
-  for (int i = 1; i <= 5; i++) {
-    tree.Insert(i, RID(i, i));
-  }
-
-  tree.Remove(3);
-
-  std::vector<RID> result;
-  EXPECT_FALSE(tree.GetValue(3, &result));
-
-  // Others still present
-  for (int i : {1, 2, 4, 5}) {
-    result.clear();
-    EXPECT_TRUE(tree.GetValue(i, &result));
-    ASSERT_EQ(result.size(), 1u);
-  }
-}
-
-GRADED_TEST_F(BPlusTreeEvalTest, DeleteMerge, 10) {
-  BPlusTree<int, RID, std::less<int>> tree("test", bpm_, std::less<int>{}, 3, 3);
-
-  for (int i = 1; i <= 10; i++) {
-    tree.Insert(i, RID(i, i));
-  }
-
-  // Delete enough to trigger merges
-  for (int i = 1; i <= 7; i++) {
-    tree.Remove(i);
-  }
-
-  // Remaining keys still accessible
-  for (int i = 8; i <= 10; i++) {
-    std::vector<RID> result;
-    EXPECT_TRUE(tree.GetValue(i, &result));
-    ASSERT_EQ(result.size(), 1u);
-  }
-
-  // Deleted keys gone
-  for (int i = 1; i <= 7; i++) {
-    std::vector<RID> result;
-    EXPECT_FALSE(tree.GetValue(i, &result));
-  }
-}
-
-GRADED_TEST_F(BPlusTreeEvalTest, DeleteRedistribute, 10) {
-  BPlusTree<int, RID, std::less<int>> tree("test", bpm_, std::less<int>{}, 4, 4);
-
-  for (int i = 1; i <= 10; i++) {
-    tree.Insert(i, RID(i, i));
-  }
-
-  // Delete from one leaf to trigger redistribution (not merge)
-  tree.Remove(1);
-  tree.Remove(2);
-
-  for (int i = 3; i <= 10; i++) {
-    std::vector<RID> result;
-    EXPECT_TRUE(tree.GetValue(i, &result));
-    ASSERT_EQ(result.size(), 1u);
-  }
-}
-
-GRADED_TEST_F(BPlusTreeEvalTest, MixedInsertDelete, 10) {
-  BPlusTree<int, RID, std::less<int>> tree("test", bpm_, std::less<int>{}, 4, 4);
-
-  // Insert 1..10
-  for (int i = 1; i <= 10; i++) {
-    tree.Insert(i, RID(i, i));
-  }
-
-  // Delete evens
-  for (int i = 2; i <= 10; i += 2) {
-    tree.Remove(i);
-  }
-
-  // Insert 11..15
-  for (int i = 11; i <= 15; i++) {
-    tree.Insert(i, RID(i, i));
-  }
-
-  // Delete some odds
-  tree.Remove(1);
-  tree.Remove(3);
-  tree.Remove(5);
-
-  // Remaining: 7, 9, 11, 12, 13, 14, 15
-  std::vector<int> expected = {7, 9, 11, 12, 13, 14, 15};
-  for (int k : expected) {
-    std::vector<RID> result;
-    EXPECT_TRUE(tree.GetValue(k, &result)) << "Missing key: " << k;
-  }
-
-  // Deleted should be gone
-  for (int k : {1, 2, 3, 4, 5, 6, 8, 10}) {
-    std::vector<RID> result;
-    EXPECT_FALSE(tree.GetValue(k, &result)) << "Key should be deleted: " << k;
-  }
-}
-
-GRADED_TEST_F(BPlusTreeEvalTest, DeleteAll, 5) {
-  BPlusTree<int, RID, std::less<int>> tree("test", bpm_, std::less<int>{}, 3, 3);
-
-  for (int i = 1; i <= 20; i++) {
-    tree.Insert(i, RID(i, i));
-  }
-
-  for (int i = 1; i <= 20; i++) {
-    tree.Remove(i);
-  }
-
-  EXPECT_TRUE(tree.IsEmpty());
-
-  for (int i = 1; i <= 20; i++) {
-    std::vector<RID> result;
-    EXPECT_FALSE(tree.GetValue(i, &result));
-  }
-}
-
-GRADED_TEST_F(BPlusTreeEvalTest, IteratorOrder, 5) {
-  BPlusTree<int, RID, std::less<int>> tree("test", bpm_, std::less<int>{}, 4, 4);
-
-  std::vector<int> keys = {5, 3, 8, 1, 9, 2, 7, 4, 6, 10};
-  for (auto k : keys) {
-    tree.Insert(k, RID(k, k));
-  }
-
-  // Iterator should return keys in sorted ascending order
-  std::sort(keys.begin(), keys.end());
-
-  int idx = 0;
-  for (auto it = tree.Begin(); it != tree.End(); ++it) {
-    ASSERT_LT(idx, static_cast<int>(keys.size()));
-    auto [key, rid] = *it;
-    EXPECT_EQ(key, keys[idx]) << "Iterator order mismatch at position " << idx;
-    idx++;
-  }
-  EXPECT_EQ(idx, static_cast<int>(keys.size()));
+  auto empty_schema = client_->ExecuteQuery("SHOW empty_view");
+  ExpectTableEquals(empty_schema, {"column_name", "column_type"},
+                    {{"flag", "flag:BOOLEAN"}, {"title", "title:VARCHAR"}});
 }
 
 }  // namespace onebase

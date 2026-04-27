@@ -17,6 +17,7 @@ class OneBaseInstance {
                            size_t buffer_pool_size = DEFAULT_BUFFER_POOL_SIZE);
   ~OneBaseInstance() = default;
 
+  auto GetDiskManager() -> DiskManager * { return disk_mgr_.get(); }
   auto GetCatalog() -> Catalog * { return catalog_.get(); }
   auto GetBufferPoolManager() -> BufferPoolManager * { return bpm_.get(); }
   auto GetTransactionManager() -> TransactionManager * { return txn_mgr_.get(); }

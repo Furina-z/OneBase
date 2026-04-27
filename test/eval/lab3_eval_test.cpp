@@ -1,385 +1,300 @@
 #include <gtest/gtest.h>
+
 #include <algorithm>
+#include <chrono>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "eval/grading.h"
+#include "eval/sql_test_client.h"
 
-#include "onebase/binder/binder.h"
-#include "onebase/buffer/buffer_pool_manager.h"
-#include "onebase/catalog/catalog.h"
 #include "onebase/catalog/column.h"
 #include "onebase/catalog/schema.h"
-#include "onebase/execution/execution_engine.h"
-#include "onebase/execution/executor_context.h"
-#include "onebase/execution/plans/plan_nodes.h"
-#include "onebase/optimizer/optimizer.h"
-#include "onebase/storage/disk/disk_manager.h"
-#include "onebase/storage/table/tuple.h"
 #include "onebase/type/type_id.h"
 #include "onebase/type/value.h"
 
 namespace onebase {
 
-class ExecutorEvalTest : public ::testing::Test {
+namespace {
+
+using onebase::eval::SqlTestClient;
+using onebase::eval::Table;
+
+auto SortRows(std::vector<std::vector<std::string>> rows) -> std::vector<std::vector<std::string>> {
+  std::sort(rows.begin(), rows.end());
+  return rows;
+}
+
+auto ExpectRows(const Table &table, const std::vector<std::string> &expected_headers,
+                std::vector<std::vector<std::string>> expected_rows) -> void {
+  EXPECT_EQ(table.GetHeaders(), expected_headers);
+  EXPECT_EQ(SortRows(table.GetRows()), SortRows(std::move(expected_rows)));
+}
+
+auto ExpectRowsIgnoringHeaders(const Table &table,
+                               std::vector<std::vector<std::string>> expected_rows) -> void {
+  EXPECT_EQ(SortRows(table.GetRows()), SortRows(std::move(expected_rows)));
+}
+
+}  // namespace
+
+class SqlExecutorEvalTest : public ::testing::Test {
  protected:
   void SetUp() override {
-    db_name_ = "__eval_exec_" + std::to_string(reinterpret_cast<uintptr_t>(this)) + ".db";
-    disk_manager_ = new DiskManager(db_name_);
-    bpm_ = new BufferPoolManager(64, disk_manager_);
-    catalog_ = new Catalog(bpm_);
-    exec_ctx_ = new ExecutorContext(catalog_, bpm_);
-    engine_ = new ExecutionEngine(exec_ctx_);
+    client_ = std::make_unique<SqlTestClient>("lab3", 128);
 
-    // Create test_1(id:INT, val:INT) with 10 rows: (0,0), (1,10), ..., (9,90)
-    Schema schema1({Column("id", TypeId::INTEGER), Column("val", TypeId::INTEGER)});
-    table1_info_ = catalog_->CreateTable("test_1", schema1);
-    for (int i = 0; i < 10; i++) {
-      table1_info_->table_->InsertTuple(Tuple({Value(TypeId::INTEGER, i), Value(TypeId::INTEGER, i * 10)}));
+    client_->CreateTable("base",
+                         Schema({Column("id", TypeId::INTEGER), Column("val", TypeId::INTEGER)}));
+    client_->CreateTable("probe",
+                         Schema({Column("id", TypeId::INTEGER), Column("tag", TypeId::INTEGER)}));
+    client_->CreateTable("copy",
+                         Schema({Column("id", TypeId::INTEGER), Column("val", TypeId::INTEGER)}));
+    client_->CreateTable("empty",
+                         Schema({Column("id", TypeId::INTEGER), Column("val", TypeId::INTEGER)}));
+
+    client_->SeedTable("base",
+                       {{Value(TypeId::INTEGER, 0), Value(TypeId::INTEGER, 0)},
+                        {Value(TypeId::INTEGER, 1), Value(TypeId::INTEGER, 10)},
+                        {Value(TypeId::INTEGER, 1), Value(TypeId::INTEGER, 11)},
+                        {Value(TypeId::INTEGER, 2), Value(TypeId::INTEGER, 20)},
+                        {Value(TypeId::INTEGER, 3), Value(TypeId::INTEGER, -30)},
+                        {Value(TypeId::INTEGER, 4), Value(TypeId::INTEGER, 40)},
+                        {Value(TypeId::INTEGER, 5), Value(TypeId::INTEGER, 50)},
+                        {Value(TypeId::INTEGER, 6), Value(TypeId::INTEGER, 60)},
+                        {Value(TypeId::INTEGER, 7), Value(TypeId::INTEGER, 70)},
+                        {Value(TypeId::INTEGER, 8), Value(TypeId::INTEGER, 80)},
+                        {Value(TypeId::INTEGER, 9), Value(TypeId::INTEGER, 90)}});
+
+    client_->SeedTable("probe",
+                       {{Value(TypeId::INTEGER, 1), Value(TypeId::INTEGER, 100)},
+                        {Value(TypeId::INTEGER, 1), Value(TypeId::INTEGER, 101)},
+                        {Value(TypeId::INTEGER, 3), Value(TypeId::INTEGER, 300)},
+                        {Value(TypeId::INTEGER, 7), Value(TypeId::INTEGER, 700)},
+                        {Value(TypeId::INTEGER, 9), Value(TypeId::INTEGER, 900)},
+                        {Value(TypeId::INTEGER, 10), Value(TypeId::INTEGER, 1000)}});
+  }
+
+  std::unique_ptr<SqlTestClient> client_;
+};
+
+class LargeSqlExecutorEvalTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    client_ = std::make_unique<SqlTestClient>("lab3_large", 256);
+
+    client_->CreateTable(
+        "facts_idx",
+        Schema({Column("id", TypeId::INTEGER), Column("bucket", TypeId::INTEGER),
+                Column("payload", TypeId::INTEGER)}));
+    client_->CreateTable(
+        "facts_scan",
+        Schema({Column("id", TypeId::INTEGER), Column("bucket", TypeId::INTEGER),
+                Column("payload", TypeId::INTEGER)}));
+    client_->CreateTable("dim", Schema({Column("id", TypeId::INTEGER), Column("label", TypeId::INTEGER)}));
+
+    std::vector<std::vector<Value>> facts_rows;
+    facts_rows.reserve(kFactRows);
+    for (int i = 0; i < kFactRows; ++i) {
+      int key = i % kKeyCardinality;
+      int bucket = i % kBucketCardinality;
+      int payload = i * 17 - 5000;
+      facts_rows.push_back({Value(TypeId::INTEGER, key), Value(TypeId::INTEGER, bucket),
+                            Value(TypeId::INTEGER, payload)});
     }
+    client_->SeedTable("facts_idx", facts_rows);
+    client_->SeedTable("facts_scan", facts_rows);
+    client_->ExecuteCommand("CREATE INDEX idx_facts_idx_id ON facts_idx (id)");
 
-    // Create test_2(id:INT, data:INT) with 5 rows: (0,100), (2,200), (4,400), (6,600), (8,800)
-    Schema schema2({Column("id", TypeId::INTEGER), Column("data", TypeId::INTEGER)});
-    table2_info_ = catalog_->CreateTable("test_2", schema2);
-    for (int i = 0; i < 5; i++) {
-      table2_info_->table_->InsertTuple(
-          Tuple({Value(TypeId::INTEGER, i * 2), Value(TypeId::INTEGER, (i * 2) * 100)}));
+    std::vector<std::vector<Value>> dim_rows;
+    dim_rows.reserve(kBucketCardinality);
+    for (int i = 0; i < kBucketCardinality; ++i) {
+      dim_rows.push_back({Value(TypeId::INTEGER, i), Value(TypeId::INTEGER, i * 100)});
     }
+    client_->SeedTable("dim", dim_rows);
   }
 
-  void TearDown() override {
-    delete engine_;
-    delete exec_ctx_;
-    delete catalog_;
-    delete bpm_;
-    disk_manager_->ShutDown();
-    delete disk_manager_;
-    std::remove(db_name_.c_str());
-  }
+  static constexpr int kFactRows = 30000;
+  static constexpr int kKeyCardinality = 997;
+  static constexpr int kBucketCardinality = 37;
 
-  // Bind SQL -> plan tree (no optimization)
-  auto Bind(const std::string &sql) -> AbstractPlanNodeRef {
-    Binder binder(catalog_);
-    return binder.BindQuery(sql);
-  }
-
-  // Bind + optimize SQL -> plan tree
-  auto BindAndOptimize(const std::string &sql) -> AbstractPlanNodeRef {
-    auto plan = Bind(sql);
-    Optimizer optimizer;
-    return optimizer.Optimize(plan);
-  }
-
-  // Execute plan and return result tuples
-  auto Execute(const AbstractPlanNodeRef &plan) -> std::vector<Tuple> {
-    std::vector<Tuple> result;
-    engine_->Execute(plan, &result);
-    return result;
-  }
-
-  // Full pipeline: SQL -> bind -> optimize -> execute
-  auto RunSQL(const std::string &sql) -> std::vector<Tuple> {
-    return Execute(BindAndOptimize(sql));
-  }
-
-  std::string db_name_;
-  DiskManager *disk_manager_{nullptr};
-  BufferPoolManager *bpm_{nullptr};
-  Catalog *catalog_{nullptr};
-  ExecutorContext *exec_ctx_{nullptr};
-  ExecutionEngine *engine_{nullptr};
-  TableInfo *table1_info_{nullptr};
-  TableInfo *table2_info_{nullptr};
+  std::unique_ptr<SqlTestClient> client_;
 };
 
 // ============================================================
-// Sequential Scan (15 pts)
+// Sequential scan and filters (15 pts)
 // ============================================================
 
-GRADED_TEST_F(ExecutorEvalTest, SeqScanEmpty, 5) {
-  Schema schema({Column("a", TypeId::INTEGER)});
-  catalog_->CreateTable("empty_tbl", schema);
+GRADED_TEST_F(SqlExecutorEvalTest, SeqScanPredicatesAndDuplicates, 15) {
+  auto all_rows = client_->ExecuteQuery("SELECT * FROM base");
+  EXPECT_EQ(all_rows.GetRowCount(), 11u);
 
-  auto result = RunSQL("SELECT * FROM empty_tbl");
-  EXPECT_EQ(result.size(), 0u);
-}
+  auto empty_rows = client_->ExecuteQuery("SELECT * FROM base WHERE id < 0");
+  EXPECT_EQ(empty_rows.GetRowCount(), 0u);
 
-GRADED_TEST_F(ExecutorEvalTest, SeqScanAll, 5) {
-  auto result = RunSQL("SELECT * FROM test_1");
-  EXPECT_EQ(result.size(), 10u);
+  auto duplicate_rows = client_->ExecuteQuery("SELECT * FROM base WHERE id = 1");
+  ExpectRows(duplicate_rows, {"id", "val"}, {{"1", "10"}, {"1", "11"}});
 
-  // Collect all id values
-  const auto *schema = &table1_info_->schema_;
-  std::vector<int> ids;
-  for (auto &t : result) {
-    ids.push_back(t.GetValue(schema, 0).GetAsInteger());
-  }
-  std::sort(ids.begin(), ids.end());
-  for (int i = 0; i < 10; i++) {
-    EXPECT_EQ(ids[i], i);
-  }
-}
-
-GRADED_TEST_F(ExecutorEvalTest, SeqScanPredicate, 5) {
-  // SELECT * FROM test_1 WHERE id > 5
-  auto result = RunSQL("SELECT * FROM test_1 WHERE id > 5");
-
-  EXPECT_EQ(result.size(), 4u);  // ids 6, 7, 8, 9
-  const auto *schema = &table1_info_->schema_;
-  for (auto &t : result) {
-    EXPECT_GT(t.GetValue(schema, 0).GetAsInteger(), 5);
-  }
+  auto bounded_rows = client_->ExecuteQuery("SELECT * FROM base WHERE id >= 3 AND id <= 5");
+  ExpectRows(bounded_rows, {"id", "val"}, {{"3", "-30"}, {"4", "40"}, {"5", "50"}});
 }
 
 // ============================================================
-// Insert (10 pts)
+// Projection and expressions (15 pts)
 // ============================================================
 
-GRADED_TEST_F(ExecutorEvalTest, InsertAndVerify, 5) {
-  // Create source and destination tables
-  Schema schema({Column("x", TypeId::INTEGER), Column("y", TypeId::INTEGER)});
-  auto *src = catalog_->CreateTable("ins_src", schema);
-  auto *dst = catalog_->CreateTable("ins_dst", schema);
+GRADED_TEST_F(SqlExecutorEvalTest, ProjectionAndArithmeticCornerCases, 15) {
+  auto projected = client_->ExecuteQuery("SELECT id, val + 1, val - id FROM base WHERE id >= 3 AND id <= 5");
+  ASSERT_EQ(projected.GetRowCount(), 3u);
+  ExpectRowsIgnoringHeaders(projected, {{"3", "-29", "-33"}, {"4", "41", "36"}, {"5", "51", "45"}});
 
-  src->table_->InsertTuple(Tuple({Value(TypeId::INTEGER, 100), Value(TypeId::INTEGER, 200)}));
-  src->table_->InsertTuple(Tuple({Value(TypeId::INTEGER, 300), Value(TypeId::INTEGER, 400)}));
-
-  // INSERT INTO ins_dst SELECT * FROM ins_src
-  Execute(Bind("INSERT INTO ins_dst SELECT * FROM ins_src"));
-
-  // Verify destination has 2 rows
-  auto result = RunSQL("SELECT * FROM ins_dst");
-  EXPECT_EQ(result.size(), 2u);
-}
-
-GRADED_TEST_F(ExecutorEvalTest, InsertCount, 5) {
-  Schema schema({Column("x", TypeId::INTEGER)});
-  auto *src = catalog_->CreateTable("cnt_src", schema);
-  auto *dst = catalog_->CreateTable("cnt_dst", schema);
-
-  for (int i = 0; i < 5; i++) {
-    src->table_->InsertTuple(Tuple({Value(TypeId::INTEGER, i)}));
-  }
-
-  auto result = Execute(Bind("INSERT INTO cnt_dst SELECT * FROM cnt_src"));
-
-  ASSERT_EQ(result.size(), 1u);
-  EXPECT_EQ(result[0].GetValue(0).GetAsInteger(), 5);
+  auto reordered = client_->ExecuteQuery("SELECT val, id FROM base WHERE id = 0 OR id = 9");
+  EXPECT_EQ(reordered.GetRowCount(), 2u);
+  ExpectRowsIgnoringHeaders(reordered, {{"0", "0"}, {"90", "9"}});
 }
 
 // ============================================================
-// Delete (5 pts)
+// DML row counts and duplicate-sensitive updates (20 pts)
 // ============================================================
 
-GRADED_TEST_F(ExecutorEvalTest, DeleteAndVerify, 5) {
-  // DELETE FROM test_1 WHERE id < 3
-  auto del_result = Execute(Bind("DELETE FROM test_1 WHERE id < 3"));
+GRADED_TEST_F(SqlExecutorEvalTest, InsertUpdateDeleteCounts, 20) {
+  auto inserted = client_->ExecuteQuery("INSERT INTO copy SELECT * FROM base WHERE id <= 2");
+  ASSERT_EQ(inserted.GetRowCount(), 1u);
+  EXPECT_EQ(inserted.GetRow(0)[0], "4");
 
-  ASSERT_EQ(del_result.size(), 1u);
-  EXPECT_EQ(del_result[0].GetValue(0).GetAsInteger(), 3);  // deleted 3 rows
+  auto updated = client_->ExecuteQuery("UPDATE copy SET val = val + 100 WHERE id = 1");
+  ASSERT_EQ(updated.GetRowCount(), 1u);
+  EXPECT_EQ(updated.GetRow(0)[0], "2");
 
-  // Verify remaining
-  auto result = RunSQL("SELECT * FROM test_1");
-  EXPECT_EQ(result.size(), 7u);
-  const auto *schema = &table1_info_->schema_;
-  for (auto &t : result) {
-    EXPECT_GE(t.GetValue(schema, 0).GetAsInteger(), 3);
-  }
+  auto deleted_none = client_->ExecuteQuery("DELETE FROM copy WHERE id < 0");
+  ASSERT_EQ(deleted_none.GetRowCount(), 1u);
+  EXPECT_EQ(deleted_none.GetRow(0)[0], "0");
+
+  auto deleted = client_->ExecuteQuery("DELETE FROM copy WHERE id = 0 OR id = 2");
+  ASSERT_EQ(deleted.GetRowCount(), 1u);
+  EXPECT_EQ(deleted.GetRow(0)[0], "2");
+
+  auto remaining = client_->ExecuteQuery("SELECT * FROM copy");
+  ExpectRows(remaining, {"id", "val"}, {{"1", "110"}, {"1", "111"}});
 }
 
 // ============================================================
-// Update (5 pts)
+// Joins (20 pts)
 // ============================================================
 
-GRADED_TEST_F(ExecutorEvalTest, UpdateAndVerify, 5) {
-  // UPDATE test_1 SET val = val + 1
-  auto upd_result = Execute(Bind("UPDATE test_1 SET val = val + 1"));
-  ASSERT_EQ(upd_result.size(), 1u);
-  EXPECT_EQ(upd_result[0].GetValue(0).GetAsInteger(), 10);  // updated 10 rows
+GRADED_TEST_F(SqlExecutorEvalTest, JoinDuplicateExplosionAndMisses, 20) {
+  auto joined = client_->ExecuteQuery("SELECT * FROM base INNER JOIN probe ON base.id = probe.id");
+  ASSERT_EQ(joined.GetRowCount(), 7u);
 
-  // Verify
-  auto result = RunSQL("SELECT * FROM test_1");
-  EXPECT_EQ(result.size(), 10u);
-  const auto *schema = &table1_info_->schema_;
-  for (auto &t : result) {
-    int id = t.GetValue(schema, 0).GetAsInteger();
-    int val = t.GetValue(schema, 1).GetAsInteger();
-    EXPECT_EQ(val, id * 10 + 1);
-  }
+  ExpectRowsIgnoringHeaders(joined, {{"1", "10", "1", "100"},
+                                     {"1", "10", "1", "101"},
+                                     {"1", "11", "1", "100"},
+                                     {"1", "11", "1", "101"},
+                                     {"3", "-30", "3", "300"},
+                                     {"7", "70", "7", "700"},
+                                     {"9", "90", "9", "900"}});
+
+  auto empty_join = client_->ExecuteQuery("SELECT * FROM base INNER JOIN probe ON base.id = probe.id WHERE base.id = 999");
+  EXPECT_EQ(empty_join.GetRowCount(), 0u);
 }
 
 // ============================================================
-// Nested Loop Join (10 pts)
+// Aggregation and grouping (15 pts)
 // ============================================================
 
-GRADED_TEST_F(ExecutorEvalTest, NestedLoopJoin, 10) {
-  // Bind without optimization -> should produce NLJ
-  auto plan = Bind("SELECT * FROM test_1 INNER JOIN test_2 ON test_1.id = test_2.id");
-  EXPECT_EQ(plan->GetType(), PlanType::NESTED_LOOP_JOIN);
+GRADED_TEST_F(SqlExecutorEvalTest, AggregationAndGroupingEdgeCases, 15) {
+  auto agg = client_->ExecuteQuery("SELECT COUNT(*), SUM(val), MIN(val), MAX(val) FROM base WHERE id >= 3");
+  ASSERT_EQ(agg.GetRowCount(), 1u);
+  EXPECT_EQ(agg.GetRow(0)[0], "7");
+  EXPECT_EQ(agg.GetRow(0)[1], "360");
+  EXPECT_EQ(agg.GetRow(0)[2], "-30");
+  EXPECT_EQ(agg.GetRow(0)[3], "90");
 
-  auto result = Execute(plan);
+  auto grouped = client_->ExecuteQuery("SELECT id / 2, COUNT(*) FROM base GROUP BY id / 2");
+  ASSERT_EQ(grouped.GetRowCount(), 5u);
 
-  // Matching ids: 0, 2, 4, 6, 8
-  EXPECT_EQ(result.size(), 5u);
-
-  // Verify each joined row
-  for (auto &t : result) {
-    int left_id = t.GetValue(0).GetAsInteger();
-    int left_val = t.GetValue(1).GetAsInteger();
-    int right_id = t.GetValue(2).GetAsInteger();
-    int right_data = t.GetValue(3).GetAsInteger();
-    EXPECT_EQ(left_id, right_id);
-    EXPECT_EQ(left_val, left_id * 10);
-    EXPECT_EQ(right_data, right_id * 100);
-  }
-}
-
-// ============================================================
-// Hash Join (10 pts) -- optimizer converts NLJ to HashJoin
-// ============================================================
-
-GRADED_TEST_F(ExecutorEvalTest, HashJoin, 10) {
-  // Bind + optimize -> should convert NLJ to HashJoin
-  auto plan = BindAndOptimize("SELECT * FROM test_1 INNER JOIN test_2 ON test_1.id = test_2.id");
-  EXPECT_EQ(plan->GetType(), PlanType::HASH_JOIN);
-
-  auto result = Execute(plan);
-
-  EXPECT_EQ(result.size(), 5u);
-
-  std::vector<int> joined_ids;
-  for (auto &t : result) {
-    joined_ids.push_back(t.GetValue(0).GetAsInteger());
-  }
-  std::sort(joined_ids.begin(), joined_ids.end());
-  EXPECT_EQ(joined_ids, (std::vector<int>{0, 2, 4, 6, 8}));
-}
-
-// ============================================================
-// Aggregation (15 pts)
-// ============================================================
-
-GRADED_TEST_F(ExecutorEvalTest, AggCountSum, 5) {
-  auto result = RunSQL("SELECT COUNT(*), SUM(val) FROM test_1");
-
-  ASSERT_EQ(result.size(), 1u);
-  EXPECT_EQ(result[0].GetValue(0).GetAsInteger(), 10);   // COUNT(*)
-  EXPECT_EQ(result[0].GetValue(1).GetAsInteger(), 450);  // SUM(0+10+20+...+90)
-}
-
-GRADED_TEST_F(ExecutorEvalTest, AggMinMax, 5) {
-  auto result = RunSQL("SELECT MIN(val), MAX(val) FROM test_1");
-
-  ASSERT_EQ(result.size(), 1u);
-  EXPECT_EQ(result[0].GetValue(0).GetAsInteger(), 0);   // MIN
-  EXPECT_EQ(result[0].GetValue(1).GetAsInteger(), 90);  // MAX
-}
-
-GRADED_TEST_F(ExecutorEvalTest, AggGroupBy, 5) {
-  // GROUP BY id / 5: group 0 (ids 0-4), group 1 (ids 5-9)
-  auto result = RunSQL("SELECT id / 5, COUNT(*) FROM test_1 GROUP BY id / 5");
-  EXPECT_EQ(result.size(), 2u);
-
-  // Sort by group key for deterministic checking
-  std::sort(result.begin(), result.end(), [](const Tuple &a, const Tuple &b) {
-    return a.GetValue(0).GetAsInteger() < b.GetValue(0).GetAsInteger();
-  });
-
-  EXPECT_EQ(result[0].GetValue(0).GetAsInteger(), 0);  // group 0
-  EXPECT_EQ(result[0].GetValue(1).GetAsInteger(), 5);   // count 5
-  EXPECT_EQ(result[1].GetValue(0).GetAsInteger(), 1);  // group 1
-  EXPECT_EQ(result[1].GetValue(1).GetAsInteger(), 5);   // count 5
-}
-
-// ============================================================
-// Sort (10 pts)
-// ============================================================
-
-GRADED_TEST_F(ExecutorEvalTest, SortAscDesc, 10) {
-  // Sort test_1 by val descending
-  auto result = RunSQL("SELECT * FROM test_1 ORDER BY val DESC");
-  ASSERT_EQ(result.size(), 10u);
-
-  const auto *schema = &table1_info_->schema_;
-  // First tuple should have val=90, last should have val=0
-  EXPECT_EQ(result[0].GetValue(schema, 1).GetAsInteger(), 90);
-  EXPECT_EQ(result[9].GetValue(schema, 1).GetAsInteger(), 0);
-
-  // Verify strictly descending order
-  for (size_t i = 1; i < result.size(); i++) {
-    EXPECT_GE(result[i - 1].GetValue(schema, 1).GetAsInteger(), result[i].GetValue(schema, 1).GetAsInteger());
-  }
-}
-
-// ============================================================
-// Limit (5 pts)
-// ============================================================
-
-GRADED_TEST_F(ExecutorEvalTest, LimitRows, 5) {
-  auto result = RunSQL("SELECT * FROM test_1 LIMIT 3");
-  EXPECT_EQ(result.size(), 3u);
-}
-
-// ============================================================
-// Sort + Limit (5 pts)
-// ============================================================
-
-GRADED_TEST_F(ExecutorEvalTest, SortPlusLimit, 5) {
-  auto result = RunSQL("SELECT * FROM test_1 ORDER BY val DESC LIMIT 3");
-
-  ASSERT_EQ(result.size(), 3u);
-  const auto *schema = &table1_info_->schema_;
-  EXPECT_EQ(result[0].GetValue(schema, 1).GetAsInteger(), 90);
-  EXPECT_EQ(result[1].GetValue(schema, 1).GetAsInteger(), 80);
-  EXPECT_EQ(result[2].GetValue(schema, 1).GetAsInteger(), 70);
-}
-
-// ============================================================
-// Projection (10 pts)
-// ============================================================
-
-GRADED_TEST_F(ExecutorEvalTest, ProjectionColumns, 5) {
-  // SELECT id FROM test_1
-  auto plan = BindAndOptimize("SELECT id FROM test_1");
-  // Verify plan tree has a projection node at the top
-  EXPECT_EQ(plan->GetType(), PlanType::PROJECTION);
-
-  auto result = Execute(plan);
-  EXPECT_EQ(result.size(), 10u);
-
-  // Each result tuple should have exactly 1 column (id)
-  for (auto &t : result) {
-    EXPECT_EQ(t.GetValues().size(), 1u);
+  std::unordered_map<int, int> counts;
+  for (const auto &row : grouped.GetRows()) {
+    counts[std::stoi(row[0])] = std::stoi(row[1]);
   }
 
-  // Collect ids and verify
-  std::vector<int> ids;
-  for (auto &t : result) {
-    ids.push_back(t.GetValue(0).GetAsInteger());
-  }
-  std::sort(ids.begin(), ids.end());
-  for (int i = 0; i < 10; i++) {
-    EXPECT_EQ(ids[i], i);
-  }
+  EXPECT_EQ(counts[0], 3);
+  EXPECT_EQ(counts[1], 2);
+  EXPECT_EQ(counts[2], 2);
+  EXPECT_EQ(counts[3], 2);
+  EXPECT_EQ(counts[4], 2);
 }
 
-GRADED_TEST_F(ExecutorEvalTest, ProjectionExpr, 5) {
-  // SELECT id, val + 1 FROM test_1
-  auto result = RunSQL("SELECT id, val + 1 FROM test_1");
-  EXPECT_EQ(result.size(), 10u);
+// ============================================================
+// Sort and limit (15 pts)
+// ============================================================
 
-  // Each tuple has 2 columns
-  for (auto &t : result) {
-    EXPECT_EQ(t.GetValues().size(), 2u);
+GRADED_TEST_F(SqlExecutorEvalTest, SortLimitAndZeroLimit, 15) {
+  auto sorted = client_->ExecuteQuery("SELECT id, val FROM base ORDER BY val DESC LIMIT 4");
+  ExpectRows(sorted, {"id", "val"}, {{"9", "90"}, {"8", "80"}, {"7", "70"}, {"6", "60"}});
+
+  auto zero_limit = client_->ExecuteQuery("SELECT id FROM base ORDER BY id LIMIT 0");
+  EXPECT_EQ(zero_limit.GetRowCount(), 0u);
+
+  auto no_match = client_->ExecuteQuery("SELECT * FROM base WHERE id < 0 ORDER BY val DESC");
+  EXPECT_EQ(no_match.GetRowCount(), 0u);
+}
+
+// ============================================================
+// Large-data robustness and index latency (20 pts)
+// ============================================================
+
+GRADED_TEST_F(LargeSqlExecutorEvalTest, LargeDataRobustness, 10) {
+  auto clustered = client_->ExecuteQuery("SELECT * FROM facts_idx WHERE id = 123");
+  EXPECT_EQ(clustered.GetRowCount(), 30u);
+
+  auto empty = client_->ExecuteQuery("SELECT * FROM facts_scan WHERE id = 123456");
+  EXPECT_EQ(empty.GetRowCount(), 0u);
+
+  auto grouped = client_->ExecuteQuery("SELECT bucket, COUNT(*) FROM facts_scan WHERE id < 80 GROUP BY bucket");
+  ASSERT_EQ(grouped.GetRowCount(), 37u);
+
+  std::unordered_map<int, int> bucket_counts;
+  for (const auto &row : grouped.GetRows()) {
+    bucket_counts[std::stoi(row[0])] = std::stoi(row[1]);
+  }
+  EXPECT_EQ(bucket_counts[0], 3);
+  EXPECT_EQ(bucket_counts[1], 3);
+  EXPECT_EQ(bucket_counts[2], 3);
+  EXPECT_EQ(bucket_counts[3], 3);
+}
+
+GRADED_TEST_F(LargeSqlExecutorEvalTest, IndexedLookupsMustNotBeSlow, 10) {
+  using clock = std::chrono::steady_clock;
+
+  auto indexed_plan = client_->OptimizeQuery(client_->BindQuery("SELECT * FROM facts_idx WHERE id = 123"));
+  if (indexed_plan->GetType() != PlanType::INDEX_SCAN) {
+    GTEST_SKIP() << "INDEX_SCAN is not active yet";
   }
 
-  // Verify: second column should be id*10 + 1
-  for (auto &t : result) {
-    int id = t.GetValue(0).GetAsInteger();
-    int computed_val = t.GetValue(1).GetAsInteger();
-    EXPECT_EQ(computed_val, id * 10 + 1);
-  }
+  auto scan_plan = client_->OptimizeQuery(client_->BindQuery("SELECT * FROM facts_scan WHERE id = 123"));
+
+  auto measure_us = [&](const AbstractPlanNodeRef &plan, int iterations) -> std::pair<long long, size_t> {
+    auto warmup = client_->ExecutePlan(plan);
+    size_t total_rows = warmup.GetRowCount();
+
+    auto start = clock::now();
+    for (int i = 0; i < iterations; ++i) {
+      total_rows += client_->ExecutePlan(plan).GetRowCount();
+    }
+    auto end = clock::now();
+    auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+    return {elapsed, total_rows};
+  };
+
+  constexpr int kIterations = 12;
+  auto [indexed_us, indexed_rows] = measure_us(indexed_plan, kIterations);
+  auto [scan_us, scan_rows] = measure_us(scan_plan, kIterations);
+
+  EXPECT_EQ(indexed_rows, scan_rows);
+  EXPECT_LT(indexed_us, 4000000);
+  EXPECT_LT(indexed_us * 4, scan_us + 1);
 }
 
 }  // namespace onebase

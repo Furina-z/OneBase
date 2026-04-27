@@ -44,8 +44,10 @@ class Catalog {
 
   auto CreateIndex(const std::string &index_name, const std::string &table_name,
                    const std::vector<uint32_t> &key_attrs) -> IndexInfo *;
+  auto DropIndex(const std::string &index_name, const std::string &table_name) -> bool;
   auto GetIndex(const std::string &index_name, const std::string &table_name) const -> IndexInfo *;
   auto GetTableIndexes(const std::string &table_name) const -> std::vector<IndexInfo *>;
+  auto GetAllIndexes() const -> std::vector<IndexInfo *>;
 
  private:
   BufferPoolManager *bpm_;

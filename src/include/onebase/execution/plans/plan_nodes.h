@@ -185,4 +185,39 @@ class ProjectionPlanNode : public AbstractPlanNode {
   std::vector<AbstractExpressionRef> expressions_;
 };
 
+enum class UtilityType {
+  CREATE_INDEX,
+  DROP_INDEX,
+  SHOW_TABLES,
+  SHOW_INDEXES,
+  SHOW_SCHEMA,
+};
+
+class UtilityPlanNode : public AbstractPlanNode {
+ public:
+  UtilityPlanNode(Schema output_schema, UtilityType utility_type, std::string table_name = "",
+                  std::string index_name = "", std::vector<uint32_t> key_attrs = {},
+                  std::vector<std::string> object_names = {}, bool missing_ok = false)
+      : AbstractPlanNode(std::move(output_schema), {}),
+        utility_type_(utility_type), table_name_(std::move(table_name)),
+        index_name_(std::move(index_name)), key_attrs_(std::move(key_attrs)),
+        object_names_(std::move(object_names)), missing_ok_(missing_ok) {}
+
+  auto GetType() const -> PlanType override { return PlanType::UTILITY; }
+  auto GetUtilityType() const -> UtilityType { return utility_type_; }
+  auto GetTableName() const -> const std::string & { return table_name_; }
+  auto GetIndexName() const -> const std::string & { return index_name_; }
+  auto GetKeyAttrs() const -> const std::vector<uint32_t> & { return key_attrs_; }
+  auto GetObjectNames() const -> const std::vector<std::string> & { return object_names_; }
+  auto GetMissingOk() const -> bool { return missing_ok_; }
+
+ private:
+  UtilityType utility_type_;
+  std::string table_name_;
+  std::string index_name_;
+  std::vector<uint32_t> key_attrs_;
+  std::vector<std::string> object_names_;
+  bool missing_ok_;
+};
+
 }  // namespace onebase
