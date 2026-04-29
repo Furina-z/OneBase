@@ -1,39 +1,19 @@
-#include <gtest/gtest.h>
-#include <cstring>
-#include "onebase/buffer/buffer_pool_manager.h"
-#include "onebase/common/exception.h"
-#include "onebase/storage/disk/disk_manager.h"
+#include "lab1_test_common.h"
 
 namespace onebase {
 
-TEST(BufferPoolManagerTest, NewPageThrows) {
-  const std::string db_name = "test_bpm.db";
-  DiskManager disk_manager(db_name);
-  BufferPoolManager bpm(10, &disk_manager);
+using onebase::test::BufferPoolManagerLab1Test;
 
-  page_id_t page_id;
-  EXPECT_THROW(bpm.NewPage(&page_id), NotImplementedException);
+TEST_F(BufferPoolManagerLab1Test, NewPageBasic) { VerifyNewPageBasic(); }
 
-  disk_manager.ShutDown();
-  std::remove(db_name.c_str());
-}
+TEST_F(BufferPoolManagerLab1Test, FetchPageBasic) { VerifyFetchPageBasic(); }
 
-TEST(BufferPoolManagerTest, FetchPageThrows) {
-  const std::string db_name = "test_bpm_fetch.db";
-  DiskManager disk_manager(db_name);
-  BufferPoolManager bpm(10, &disk_manager);
+TEST_F(BufferPoolManagerLab1Test, UnpinAndEvict) { VerifyUnpinAndEvict(); }
 
-  EXPECT_THROW(bpm.FetchPage(0), NotImplementedException);
+TEST_F(BufferPoolManagerLab1Test, DirtyPagePersistence) { VerifyDirtyPagePersistence(); }
 
-  disk_manager.ShutDown();
-  std::remove(db_name.c_str());
-}
+TEST_F(BufferPoolManagerLab1Test, DeletePage) { VerifyDeletePage(); }
 
-// Students: After implementing BPM, add tests for:
-// - NewPage/FetchPage/UnpinPage cycle
-// - Eviction when pool is full
-// - Dirty page flush on eviction
-// - DeletePage
-// - FlushPage/FlushAllPages
+TEST_F(BufferPoolManagerLab1Test, FlushPage) { VerifyFlushPage(); }
 
 }  // namespace onebase

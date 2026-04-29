@@ -1,25 +1,24 @@
-#include <gtest/gtest.h>
-#include "onebase/common/exception.h"
-#include "onebase/execution/executors/seq_scan_executor.h"
+#include "lab3_test_common.h"
 
 namespace onebase {
 
-TEST(ExecutorTest, SeqScanThrows) {
-  // SeqScanExecutor requires a working BPM + Catalog
-  // Test that Init/Next throw NotImplementedException
-  SUCCEED() << "Executor tests require working BPM + Catalog. "
-            << "Implement Labs 1-2 first, then run these tests.";
-}
+using onebase::test::LargeSqlExecutorLab3Test;
+using onebase::test::SqlExecutorLab3Test;
 
-// Students: After implementing executors, add tests for:
-// - SeqScan: scan empty table, scan table with data, scan with predicate
-// - Insert: insert rows, verify count
-// - Delete: delete rows, verify count
-// - Update: update rows
-// - NestedLoopJoin: join two tables
-// - HashJoin: join two tables using hash
-// - Aggregation: COUNT, SUM, MIN, MAX, GROUP BY
-// - Sort: sort by column ASC/DESC
-// - Limit: limit output rows
+TEST_F(SqlExecutorLab3Test, SeqScanPredicatesAndDuplicates) { VerifySeqScanPredicatesAndDuplicates(); }
+
+TEST_F(SqlExecutorLab3Test, ProjectionAndArithmeticCornerCases) { VerifyProjectionAndArithmeticCornerCases(); }
+
+TEST_F(SqlExecutorLab3Test, InsertUpdateDeleteCounts) { VerifyInsertUpdateDeleteCounts(); }
+
+TEST_F(SqlExecutorLab3Test, JoinDuplicateExplosionAndMisses) { VerifyJoinDuplicateExplosionAndMisses(); }
+
+TEST_F(SqlExecutorLab3Test, AggregationAndGroupingEdgeCases) { VerifyAggregationAndGroupingEdgeCases(); }
+
+TEST_F(SqlExecutorLab3Test, SortLimitAndZeroLimit) { VerifySortLimitAndZeroLimit(); }
+
+TEST_F(LargeSqlExecutorLab3Test, LargeDataRobustness) { VerifyLargeDataRobustness(); }
+
+TEST_F(LargeSqlExecutorLab3Test, IndexedLookupsMustNotBeSlow) { VerifyIndexedLookupsMustNotBeSlow(); }
 
 }  // namespace onebase

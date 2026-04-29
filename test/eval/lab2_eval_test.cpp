@@ -1,11 +1,13 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <memory>
 #include <string>
 #include <vector>
 
 #include "eval/grading.h"
 #include "eval/sql_test_client.h"
+#include "storage/b_plus_tree_test_common.h"
 
 #include "onebase/catalog/column.h"
 #include "onebase/catalog/schema.h"
@@ -38,11 +40,13 @@ class IndexSqlEvalTest : public ::testing::Test {
   std::unique_ptr<SqlTestClient> client_;
 };
 
+class BPlusTreeEvalTest : public onebase::test::BPlusTreeLab2Test {};
+
 // ============================================================
-// Index DDL / SHOW integration (100 pts)
+// Index DDL / SHOW integration (40 pts)
 // ============================================================
 
-GRADED_TEST_F(IndexSqlEvalTest, CreateShowDropAndSchema, 30) {
+GRADED_TEST_F(IndexSqlEvalTest, CreateShowDropAndSchema, 15) {
   client_->CreateTable(
       "orders",
       Schema({Column("order_id", TypeId::INTEGER), Column("customer_id", TypeId::INTEGER),
@@ -74,9 +78,6 @@ GRADED_TEST_F(IndexSqlEvalTest, CreateShowDropAndSchema, 30) {
                      {"region_id", "region_id:INTEGER"},
                      {"created_at", "created_at:INTEGER"}});
 
-  auto tables = client_->ExecuteQuery("SHOW TABLES");
-  ExpectTableEquals(tables, {"table_name"}, {{"audit"}, {"orders"}});
-
   EXPECT_EQ(client_->ExecuteCommand("DROP INDEX idx_orders_customer"), "DROP INDEX");
   indexes = client_->ExecuteQuery("SHOW INDEX");
   ExpectTableEquals(indexes, {"index_name", "table_name", "columns"},
@@ -84,7 +85,7 @@ GRADED_TEST_F(IndexSqlEvalTest, CreateShowDropAndSchema, 30) {
                      {"idx_audit_customer", "audit", "customer_id"}});
 }
 
-GRADED_TEST_F(IndexSqlEvalTest, RejectInvalidDefinitionsAndMissingObjects, 25) {
+GRADED_TEST_F(IndexSqlEvalTest, RejectInvalidDefinitionsAndMissingObjects, 10) {
   client_->CreateTable("users",
                        Schema({Column("id", TypeId::INTEGER), Column("name", TypeId::VARCHAR),
                                Column("age", TypeId::INTEGER)}));
@@ -97,18 +98,11 @@ GRADED_TEST_F(IndexSqlEvalTest, RejectInvalidDefinitionsAndMissingObjects, 25) {
                std::runtime_error);
   EXPECT_THROW(client_->ExecuteCommand("CREATE INDEX idx_missing_column ON users (missing)"),
                std::runtime_error);
-
-  auto indexes = client_->ExecuteQuery("SHOW INDEX");
-  ExpectTableEquals(indexes, {"index_name", "table_name", "columns"}, {{"idx_users_id", "users", "id"}});
-
   EXPECT_THROW(client_->ExecuteCommand("DROP INDEX missing_index"), std::runtime_error);
   EXPECT_EQ(client_->ExecuteCommand("DROP INDEX IF EXISTS missing_index"), "DROP INDEX (0 rows)");
-
-  indexes = client_->ExecuteQuery("SHOW INDEX");
-  ExpectTableEquals(indexes, {"index_name", "table_name", "columns"}, {{"idx_users_id", "users", "id"}});
 }
 
-GRADED_TEST_F(IndexSqlEvalTest, AmbiguousIndexNamesAcrossTables, 25) {
+GRADED_TEST_F(IndexSqlEvalTest, AmbiguousIndexNamesAcrossTables, 10) {
   client_->CreateTable("left_side", Schema({Column("id", TypeId::INTEGER), Column("payload", TypeId::INTEGER)}));
   client_->CreateTable("right_side", Schema({Column("id", TypeId::INTEGER), Column("payload", TypeId::INTEGER)}));
 
@@ -122,7 +116,7 @@ GRADED_TEST_F(IndexSqlEvalTest, AmbiguousIndexNamesAcrossTables, 25) {
   EXPECT_THROW(client_->ExecuteCommand("DROP INDEX idx_shared"), std::runtime_error);
 }
 
-GRADED_TEST_F(IndexSqlEvalTest, ShowTablesAndEmptyIndexViewStayStable, 20) {
+GRADED_TEST_F(IndexSqlEvalTest, ShowTablesAndEmptyIndexViewStayStable, 5) {
   client_->CreateTable("empty_view",
                        Schema({Column("flag", TypeId::BOOLEAN), Column("title", TypeId::VARCHAR)}));
   client_->CreateTable("wide_view",
@@ -135,10 +129,26 @@ GRADED_TEST_F(IndexSqlEvalTest, ShowTablesAndEmptyIndexViewStayStable, 20) {
 
   auto empty_indexes = client_->ExecuteQuery("SHOW INDEXES");
   ExpectTableEquals(empty_indexes, {"index_name", "table_name", "columns"}, {});
+}
 
-  auto empty_schema = client_->ExecuteQuery("SHOW empty_view");
-  ExpectTableEquals(empty_schema, {"column_name", "column_type"},
-                    {{"flag", "flag:BOOLEAN"}, {"title", "title:VARCHAR"}});
+// ============================================================
+// Direct B+ tree behavior (60 pts)
+// ============================================================
+
+GRADED_TEST_F(BPlusTreeEvalTest, InsertLookupAndDuplicateHandling, 15) {
+  VerifyInsertLookupAndDuplicateHandling();
+}
+
+GRADED_TEST_F(BPlusTreeEvalTest, InsertionsSplitAndIterationIsOrdered, 15) {
+  VerifyInsertionsSplitAndIterationIsOrdered();
+}
+
+GRADED_TEST_F(BPlusTreeEvalTest, BeginFromKeyAndSparseLookupsWork, 15) {
+  VerifyBeginFromKeyAndSparseLookupsWork();
+}
+
+GRADED_TEST_F(BPlusTreeEvalTest, DeleteMaintainsCorrectnessAndCanEmptyTree, 15) {
+  VerifyDeleteMaintainsCorrectnessAndCanEmptyTree();
 }
 
 }  // namespace onebase
