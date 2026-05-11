@@ -1,5 +1,7 @@
 #include "onebase/storage/page/b_plus_tree_leaf_page.h"
+
 #include <functional>
+
 #include "onebase/common/exception.h"
 
 namespace onebase {
@@ -26,53 +28,150 @@ auto B_PLUS_TREE_LEAF_PAGE_TYPE::ValueAt(int index) const -> ValueType {
 
 template <typename KeyType, typename ValueType, typename KeyComparator>
 auto B_PLUS_TREE_LEAF_PAGE_TYPE::KeyIndex(const KeyType &key, const KeyComparator &comparator) const -> int {
-  // TODO(student): Binary search for the index of key
-  throw NotImplementedException("BPlusTreeLeafPage::KeyIndex");
+  int left = 0;
+  int right = GetSize();
+
+  while (left < right) {
+    int mid = left + (right - left) / 2;
+
+    if (comparator(array_[mid].first, key)) {
+      left = mid + 1;
+    } else {
+      right = mid;
+    }
+  }
+
+  return left;
 }
 
 template <typename KeyType, typename ValueType, typename KeyComparator>
 auto B_PLUS_TREE_LEAF_PAGE_TYPE::Lookup(const KeyType &key, ValueType *value,
                                          const KeyComparator &comparator) const -> bool {
-  // TODO(student): Look up a key and return its associated value
-  throw NotImplementedException("BPlusTreeLeafPage::Lookup");
+  int index = KeyIndex(key, comparator);
+
+  if (index >= GetSize()) {
+    return false;
+  }
+
+  const KeyType &candidate = array_[index].first;
+
+  if (!comparator(candidate, key) && !comparator(key, candidate)) {
+    *value = array_[index].second;
+    return true;
+  }
+
+  return false;
 }
 
 template <typename KeyType, typename ValueType, typename KeyComparator>
 auto B_PLUS_TREE_LEAF_PAGE_TYPE::Insert(const KeyType &key, const ValueType &value,
                                          const KeyComparator &comparator) -> int {
-  // TODO(student): Insert a key-value pair in sorted order
-  throw NotImplementedException("BPlusTreeLeafPage::Insert");
+  int index = KeyIndex(key, comparator);
+
+  if (index < GetSize()) {
+    const KeyType &candidate = array_[index].first;
+    if (!comparator(candidate, key) && !comparator(key, candidate)) {
+      return GetSize();
+    }
+  }
+
+  for (int i = GetSize(); i > index; --i) {
+    array_[i] = array_[i - 1];
+  }
+
+  array_[index] = std::make_pair(key, value);
+  SetSize(GetSize() + 1);
+
+  return GetSize();
 }
 
 template <typename KeyType, typename ValueType, typename KeyComparator>
 auto B_PLUS_TREE_LEAF_PAGE_TYPE::RemoveAndDeleteRecord(const KeyType &key,
                                                         const KeyComparator &comparator) -> int {
-  // TODO(student): Remove a key-value pair
-  throw NotImplementedException("BPlusTreeLeafPage::RemoveAndDeleteRecord");
+  int index = KeyIndex(key, comparator);
+
+  if (index >= GetSize()) {
+    return GetSize();
+  }
+
+  const KeyType &candidate = array_[index].first;
+  if (comparator(candidate, key) || comparator(key, candidate)) {
+    return GetSize();
+  }
+
+  for (int i = index; i < GetSize() - 1; ++i) {
+    array_[i] = array_[i + 1];
+  }
+
+  SetSize(GetSize() - 1);
+  return GetSize();
 }
 
 template <typename KeyType, typename ValueType, typename KeyComparator>
 void B_PLUS_TREE_LEAF_PAGE_TYPE::MoveHalfTo(BPlusTreeLeafPage *recipient) {
-  // TODO(student): Move second half of entries to recipient during split
-  throw NotImplementedException("BPlusTreeLeafPage::MoveHalfTo");
+  int total_size = GetSize();
+  int start = total_size / 2;
+  int move_count = total_size - start;
+
+  for (int i = 0; i < move_count; ++i) {
+    recipient->array_[i] = array_[start + i];
+  }
+
+  recipient->SetSize(move_count);
+  SetSize(start);
+
+  recipient->SetNextPageId(GetNextPageId());
 }
 
 template <typename KeyType, typename ValueType, typename KeyComparator>
 void B_PLUS_TREE_LEAF_PAGE_TYPE::MoveAllTo(BPlusTreeLeafPage *recipient) {
-  // TODO(student): Move all entries to recipient during merge
-  throw NotImplementedException("BPlusTreeLeafPage::MoveAllTo");
+  int recipient_size = recipient->GetSize();
+  int size = GetSize();
+
+  for (int i = 0; i < size; ++i) {
+    recipient->array_[recipient_size + i] = array_[i];
+  }
+
+  recipient->SetSize(recipient_size + size);
+  SetSize(0);
+
+  recipient->SetNextPageId(GetNextPageId());
 }
 
 template <typename KeyType, typename ValueType, typename KeyComparator>
 void B_PLUS_TREE_LEAF_PAGE_TYPE::MoveFirstToEndOf(BPlusTreeLeafPage *recipient) {
-  // TODO(student): Move first entry to end of recipient
-  throw NotImplementedException("BPlusTreeLeafPage::MoveFirstToEndOf");
+  if (GetSize() == 0) {
+    return;
+  }
+
+  int recipient_size = recipient->GetSize();
+
+  recipient->array_[recipient_size] = array_[0];
+  recipient->SetSize(recipient_size + 1);
+
+  for (int i = 0; i < GetSize() - 1; ++i) {
+    array_[i] = array_[i + 1];
+  }
+
+  SetSize(GetSize() - 1);
 }
 
 template <typename KeyType, typename ValueType, typename KeyComparator>
 void B_PLUS_TREE_LEAF_PAGE_TYPE::MoveLastToFrontOf(BPlusTreeLeafPage *recipient) {
-  // TODO(student): Move last entry to front of recipient
-  throw NotImplementedException("BPlusTreeLeafPage::MoveLastToFrontOf");
+  if (GetSize() == 0) {
+    return;
+  }
+
+  int recipient_size = recipient->GetSize();
+
+  for (int i = recipient_size; i > 0; --i) {
+    recipient->array_[i] = recipient->array_[i - 1];
+  }
+
+  recipient->array_[0] = array_[GetSize() - 1];
+  recipient->SetSize(recipient_size + 1);
+
+  SetSize(GetSize() - 1);
 }
 
 }  // namespace onebase
